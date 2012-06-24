@@ -21,7 +21,7 @@ public enum Connection
     /**
      * Class that is used to time out the Bluetooth communication
      */
-    class Reaper extends TimerTask
+    static class Reaper extends TimerTask
     {
 		Connection parent;
 		Reaper(Connection p)
@@ -126,11 +126,14 @@ public enum Connection
      */
     public synchronized void connect() throws IOException
     {
+    	DebugLogManager.INSTANCE.log("connect() : Current state "+currentState, Log.DEBUG);
+        
         if (currentState != ConnectionState.STATE_NONE)
         {
             return;
         }
         setState(ConnectionState.STATE_CONNECTING);
+        DebugLogManager.INSTANCE.log("connect() : Current state "+currentState, Log.DEBUG);
         remote = adapter.getRemoteDevice(btAddr);
         getSocket(remote);
 
@@ -138,6 +141,8 @@ public enum Connection
 
         try
         {
+        	DebugLogManager.INSTANCE.log("connect() : Attempting connection", Log.DEBUG);
+            
             socket.connect();
         }
         catch (IOException e)
@@ -177,6 +182,8 @@ public enum Connection
         if (mmInStream != null && mmOutStream != null)
         {
             setState(ConnectionState.STATE_CONNECTED);
+            DebugLogManager.INSTANCE.log("connect() : Current state "+currentState, Log.DEBUG);
+            
         }
         else
         {
@@ -213,6 +220,8 @@ public enum Connection
      */
     private synchronized void checkConnection() throws IOException
     {
+    	DebugLogManager.INSTANCE.log("checkConnection()", Log.DEBUG);
+        
         if (currentState == ConnectionState.STATE_NONE)
         {
             boolean autoConnect = ApplicationSettings.INSTANCE.autoConnectable();
@@ -238,13 +247,14 @@ public enum Connection
      */
     private void delay(int d)
     {
-        try
+        DebugLogManager.INSTANCE.log("Sleeping for "+d+"ms", Log.DEBUG);
+    	try
         {
             Thread.sleep(d);
         }
         catch (InterruptedException e)
         {
-            // Swallow
+        	DebugLogManager.INSTANCE.log("sleep was interrupted", Log.DEBUG);
         }
     }
 
@@ -261,6 +271,7 @@ public enum Connection
      */
     public synchronized void tearDown()
     {
+    	DebugLogManager.INSTANCE.log("tearDown()", Log.DEBUG);
         if (mmInStream != null)
         {
             try
@@ -307,7 +318,7 @@ public enum Connection
      * @param d         Delay to wait after sending command
      * @throws IOException
      */
-    public void writeCommand(byte[] command, int d) throws IOException
+    public void writeCommand(byte[] command, int d,boolean isCRC32) throws IOException
     {
         checkConnection();
         int dreckCount = mmInStream.available();
@@ -324,6 +335,10 @@ public enum Connection
             }
             DebugLogManager.INSTANCE.log(b.toString(), Log.DEBUG);
         }
+        if(isCRC32)
+        {
+        	command = CRC32ProtocolHandler.wrap(command);
+        }
         DebugLogManager.INSTANCE.log("Writing", command, Log.DEBUG);
         this.mmOutStream.write(command);
         this.mmOutStream.flush();
@@ -338,11 +353,11 @@ public enum Connection
      * @return
      * @throws IOException
      */
-    public byte[] writeAndRead(byte[] cmd, int d) throws IOException
+    public byte[] writeAndRead(byte[] cmd, int d,boolean isCRC32) throws IOException
     {
-        writeCommand(cmd, d);
+        writeCommand(cmd, d,isCRC32);
 
-        byte[] result = readBytes();
+        byte[] result = readBytes(isCRC32);
         return result;
     }
 
@@ -354,11 +369,11 @@ public enum Connection
      * @param d         Delay to wait after sending command
      * @throws IOException
      */
-    public void writeAndRead(byte[] cmd, byte[] result, int d) throws IOException
+    public void writeAndRead(byte[] cmd, byte[] result, int d,boolean isCRC32) throws IOException
     {
-        writeCommand(cmd, d);
+        writeCommand(cmd, d,isCRC32);
 
-        readBytes(result);
+        readBytes(result,isCRC32);
     }
 
     /**
@@ -367,18 +382,23 @@ public enum Connection
      * @param bytes
      * @throws IOException
      */
-    public void readBytes(byte[] bytes) throws IOException
+    public void readBytes(byte[] bytes,boolean isCRC32) throws IOException
     {
         checkConnection();
         TimerTask reaper = new Reaper(this);
         t.schedule(reaper, IO_TIMEOUT);
         int target = bytes.length;
+        if(isCRC32)
+        {
+        	target += 7;
+        }
+        byte[] buffer = new byte[target];
         int read = 0;
         try
         {
             while (read < target)
             {
-                int numRead = mmInStream.read(bytes, read, target - read);
+                int numRead = mmInStream.read(buffer, read, target - read);
                 if (numRead == -1)
                 {
                     throw new IOException("end of stream attempting to read");
@@ -387,8 +407,20 @@ public enum Connection
                 DebugLogManager.INSTANCE.log("readBytes[] : target = "+target+" read so far :" +read, Log.DEBUG);
             }
             reaper.cancel();
-            DebugLogManager.INSTANCE.log("readBytes[]",bytes, Log.DEBUG);
-            
+            DebugLogManager.INSTANCE.log("readBytes[]",buffer, Log.DEBUG);
+            if(isCRC32)
+            {
+            	if(!CRC32ProtocolHandler.check(buffer))
+            	{
+            		throw new IOException("CRC32 check failed");
+            	}
+            	byte[] actual = CRC32ProtocolHandler.unwrap(buffer);
+            	System.arraycopy(actual, 0, bytes, 0, bytes.length);
+            }
+            else
+            {
+            	System.arraycopy(buffer, 0, bytes, 0, bytes.length);
+            }
         }
         catch (IOException e)
         {
@@ -406,7 +438,7 @@ public enum Connection
      * @return Array of bytes read from Bluetooth stream
      * @throws IOException
      */
-    public byte[] readBytes() throws IOException
+    public byte[] readBytes(boolean isCRC32) throws IOException
     {
         checkConnection();
 
@@ -426,6 +458,14 @@ public enum Connection
                 
         DebugLogManager.INSTANCE.log("readBytes", result, Log.DEBUG);
         
+        if(isCRC32)
+        {
+        	if(!CRC32ProtocolHandler.check(result))
+        	{
+        		throw new IOException("CRC32 check failed");
+        	}
+        	result = CRC32ProtocolHandler.unwrap(result);
+        }
         String status = new String(result);
         if (!status.equals(""))
         {
@@ -442,6 +482,7 @@ public enum Connection
      */
     public void flushAll() throws IOException
     {
+    	DebugLogManager.INSTANCE.log("flushAll()", Log.DEBUG);
         checkConnection();
 
         mmOutStream.flush();
@@ -475,6 +516,8 @@ public enum Connection
      */
     public synchronized void disconnect()
     {
+    	DebugLogManager.INSTANCE.log("disconnect()", Log.DEBUG);
+        
         tearDown();
     }
 }
